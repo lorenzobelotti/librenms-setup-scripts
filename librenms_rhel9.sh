@@ -126,6 +126,8 @@ setsebool -P httpd_can_network_relay 1
 setsebool -P nis_enabled 1
 setsebool -P domain_can_mmap_files 1
 setcap cap_net_raw+ep /usr/sbin/fping
+ausearch -c 'php-fpm' --raw | audit2allow -M my-phpfpm
+semodule -X 300 -i my-phpfpm.pp
 
 # Firewall Open Ports
 firewall-cmd --zone public --add-service http --add-service https
@@ -163,4 +165,3 @@ chmod -R ug=rwX $LIBRENMS_SYSTEM_DIR/rrd $LIBRENMS_SYSTEM_DIR/logs $LIBRENMS_SYS
 # Prevent update errors
 git config --global --add safe.directory $LIBRENMS_SYSTEM_DIR
 $LIBRENMS_SYSTEM_DIR/scripts/github-remove -d
-
