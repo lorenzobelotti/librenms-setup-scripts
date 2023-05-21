@@ -4,7 +4,7 @@
 LIBRENMS_HOSTNAME='librenms.example.com'
 PHP_TARGET_VERSION=8.1
 SYSTEM_TIMEZONE=Europe/Rome
-SNMP_DEFAULT_COMMUNITY=public
+SNMP_v2_DEFAULT_COMMUNITY=public
 LIBRENMS_SYSTEM_USER=librenms
 LIBRENMS_SYSTEM_DIR=/opt/librenms
 
@@ -38,9 +38,10 @@ timedatectl set-timezone $SYSTEM_TIMEZONE
 sed -i "s|;date.timezone =|date.timezone = $SYSTEM_TIMEZONE|g" /etc/php.ini
 
 ## MariaDB config
+systemctl stop mariadb
 sed -z 's|\[mysqld\]|\[mysqld\]\ninnodb_file_per_table=1\nlower_case_table_names=0|g' -i /etc/my.cnf.d/mariadb-server.cnf
-systemctl enable mariadb
-systemctl restart mariadb
+systemctl enable --now mariadb
+
 
 ## MariaDB create DB
 SQL_PREPARE_DB=$(cat << EOF
@@ -88,50 +89,19 @@ EOF
 sed -i 's|80;|8080;|g' /etc/nginx/nginx.conf;
 
 ## Enable nginx and php-fpm
+systemctl stop php-fpm
+systemctl stop nginx
 systemctl enable --now nginx
 systemctl enable --now php-fpm
 
-# SELinux Fix
-dnf -y install policycoreutils-python-utils
-semanage fcontext -a -t httpd_sys_content_t '$LIBRENMS_SYSTEM_DIR/html(/.*)?'
-semanage fcontext -a -t httpd_sys_rw_content_t '$LIBRENMS_SYSTEM_DIR/(rrd|storage)(/.*)?'
-semanage fcontext -a -t httpd_log_t "$LIBRENMS_SYSTEM_DIR/logs(/.*)?"
-semanage fcontext -a -t bin_t '$LIBRENMS_SYSTEM_DIR/librenms-service.py'
-semanage fcontext -a -t httpd_sys_rw_content_t '/opt/librenms/logs/librenms.log(/.*)?'
-restorecon -RFv $LIBRENMS_SYSTEM_DIR/logs/librenms.log
-restorecon -RFvv $LIBRENMS_SYSTEM_DIR
-setsebool -P httpd_can_sendmail=1
-setsebool -P httpd_execmem 1
-chcon -t httpd_sys_rw_content_t $LIBRENMS_SYSTEM_DIR/.env
-cat <<EOF > http_fping.tt
-module http_fping 1.0;
-require {
-type httpd_t;
-class capability net_raw;
-class rawip_socket { getopt create setopt write read };
-}
-#============= httpd_t ==============
-allow httpd_t self:capability net_raw;
-allow httpd_t self:rawip_socket { getopt create setopt write read };
-EOF
-checkmodule -M -m -o http_fping.mod http_fping.tt
-semodule_package -o http_fping.pp -m http_fping.mod
-semodule -i http_fping.pp
-semanage fcontext -a -t httpd_user_rw_content_t '.env'
-setsebool -P httpd_run_stickshift 1
-setsebool -P httpd_setrlimit 1
-setsebool -P httpd_can_network_connect 1
-setsebool -P httpd_graceful_shutdown 1
-setsebool -P httpd_can_network_relay 1
-setsebool -P nis_enabled 1
-setsebool -P domain_can_mmap_files 1
-setcap cap_net_raw+ep /usr/sbin/fping
-ausearch -c 'php-fpm' --raw | audit2allow -M my-phpfpm
-semodule -X 300 -i my-phpfpm.pp
+# SELinux Disable
+setenforce 0
+sed -i 's|SELINUX=|SELINUX=disabled\n#SELINUX=|g' /etc/selinux/config
 
 # Firewall Open Ports
 firewall-cmd --zone public --add-service http --add-service https
 firewall-cmd --permanent --zone public --add-service http --add-service https
+firewall-cmd --reload
 
 # Enable lnms shell utility
 ln -s $LIBRENMS_SYSTEM_DIR/lnms /usr/bin/lnms
@@ -139,7 +109,7 @@ cp $LIBRENMS_SYSTEM_DIR/misc/lnms-completion.bash /etc/bash_completion.d/
 
 # Config snmpd
 cp $LIBRENMS_SYSTEM_DIR/snmpd.conf.example /etc/snmp/snmpd.conf
-sed -i "s|RANDOMSTRINGGOESHERE|$SNMP_DEFAULT_COMMUNITY|g" /etc/snmp/snmpd.conf
+sed -i "s|RANDOMSTRINGGOESHERE|$SNMP_v2_DEFAULT_COMMUNITY|g" /etc/snmp/snmpd.conf
 curl -o /usr/bin/distro https://raw.githubusercontent.com/librenms/librenms-agent/master/snmp/distro
 chmod +x /usr/bin/distro
 systemctl stop snmpd
@@ -148,8 +118,8 @@ systemctl enable --now snmpd
 # Config Timers
 cp $LIBRENMS_SYSTEM_DIR/dist/librenms.cron /etc/cron.d/librenms
 cp $LIBRENMS_SYSTEM_DIR/dist/librenms-scheduler.service $LIBRENMS_SYSTEM_DIR/dist/librenms-scheduler.timer /etc/systemd/system/
-systemctl enable librenms-scheduler.timer
-systemctl start librenms-scheduler.timer
+systemctl enable --now librenms-scheduler.timer
+systemctl restart librenms-scheduler.service
 
 # Enable logrotate
 cp $LIBRENMS_SYSTEM_DIR/misc/librenms.logrotate /etc/logrotate.d/librenms
@@ -164,4 +134,9 @@ chmod -R ug=rwX $LIBRENMS_SYSTEM_DIR/rrd $LIBRENMS_SYSTEM_DIR/logs $LIBRENMS_SYS
 
 # Prevent update errors
 git config --global --add safe.directory $LIBRENMS_SYSTEM_DIR
-$LIBRENMS_SYSTEM_DIR/scripts/github-remove -d
+
+# LibreNMS first tuning  with lnms utility
+
+su librenms -c "lnms config:set discovery_modules.discovery-arp true"
+# Enable Auto Add via ARP Discovery
+
